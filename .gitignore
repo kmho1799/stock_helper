@@ -1,0 +1,33 @@
+# 의존성
+node_modules/
+
+# 빌드 결과물
+dist/
+
+# 환경 변수 (텔레그램 토큰, Chat ID 등 민감 정보)
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+
+# 로그
+*.log
+logs/
+npm-debug.log*
+
+# OS 파일
+.DS_Store
+Thumbs.db
+
+# 에디터
+.vscode/settings.json
+.idea/
+
+# 인증서 / 키
+*.pem
+*.key
+*.cert
+*.p12
+
+.claude/
