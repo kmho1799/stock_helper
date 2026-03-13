@@ -32,6 +32,11 @@ interface CycleEntry {
 async function runMonitorCycle(): Promise<void> {
   const marketState = await getMarketState();
 
+  if (marketState === "CLOSED") {
+    console.log(`[${new Date().toLocaleString("ko-KR")}] 휴장일 - 알림 및 모니터링 스킵`);
+    return;
+  }
+
   if (CONFIG.marketHoursOnly && marketState !== "REGULAR") {
     console.log(
       `[${new Date().toLocaleString("ko-KR")}] 장외 시간 (${MARKET_STATE_LABEL[marketState] ?? marketState}) - 스킵`
