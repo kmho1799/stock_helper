@@ -147,6 +147,21 @@ export const STOCKS: StockConfig[] = [
     },
   },
   {
+    ticker: "ORCL",
+    name: "오라클",
+    alerts: {
+      ...defaultAlerts,
+      rsiOversold: 30,
+      rsiOverbought: 70,
+      rsiWeeklyOversold: 30,
+      rsiWeeklyOverbought: 70,
+      priceBelowAlert: null,
+      priceAboveAlert: null,
+      dailyChangePercent: -5,
+      dailyChangePercentUp: 5,
+    },
+  },
+  {
     ticker: "WGMI",
     name: "비트채굴 ETF",
     alerts: {
