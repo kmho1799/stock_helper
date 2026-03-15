@@ -8,6 +8,7 @@ const PERIODIC_SUMMARY_INTERVAL_MS = 30 * 60 * 1000;
 let lastPeriodicSummaryAt: Date | null = null;
 
 const prevSignalScores = new Map<string, number>();
+const prevSentRsiValues = new Map<string, number>();
 
 const MARKET_STATE_LABEL: Record<string, string> = {
   REGULAR: "정규장",
@@ -23,10 +24,12 @@ interface CycleEntry {
   name: string;
   price: number;
   dailyChangePercent: number;
+  rsi: number | null;
   signal: SignalResult;
   alerts: string[];
   includeStrongSignal: boolean;
   prevSignalScore: number | null;
+  prevSentRsi: number | null;
 }
 
 async function runMonitorCycle(): Promise<void> {
@@ -57,6 +60,7 @@ async function runMonitorCycle(): Promise<void> {
       const sign = data.dailyChangePercent >= 0 ? "+" : "";
       const rsi = data.rsi !== null ? data.rsi.toFixed(1) : "N/A";
       const rsiW = data.rsiWeekly !== null ? data.rsiWeekly.toFixed(1) : "N/A";
+      const intradayRsi = data.intradayRsi !== null ? data.intradayRsi.toFixed(1) : "N/A";
       const bb = data.bollinger
         ? `$${data.bollinger.lower.toFixed(2)}~$${data.bollinger.upper.toFixed(2)}`
         : "N/A";
@@ -107,10 +111,12 @@ async function runMonitorCycle(): Promise<void> {
         name: stock.name,
         price: data.currentPrice,
         dailyChangePercent: data.dailyChangePercent,
+        rsi: data.rsi,
         signal,
         alerts,
         includeStrongSignal,
         prevSignalScore: prevSignalScores.get(stock.ticker) ?? null,
+        prevSentRsi: prevSentRsiValues.get(stock.ticker) ?? null,
       });
     } catch (err) {
       console.error(`  [${stock.ticker}] 오류 발생:`, err);
@@ -155,8 +161,16 @@ async function runMonitorCycle(): Promise<void> {
         ? ` / 이전 ${e.prevSignalScore > 0 ? "+" : ""}${e.prevSignalScore}`
         : "";
     const sessionLabel = marketState !== "REGULAR" ? ` [${stateStr}]` : "";
+    const rsiDelta = e.rsi !== null && e.prevSentRsi !== null ? e.rsi - e.prevSentRsi : null;
+    const rsiDeltaText =
+      e.rsi === null
+        ? "N/A"
+        : rsiDelta === null
+          ? `${e.rsi.toFixed(1)} (첫 전송)`
+          : `${e.rsi.toFixed(1)} (${rsiDelta >= 0 ? "+" : ""}${rsiDelta.toFixed(1)})`;
     msg += `\n\n${e.signal.emoji} <b>[${e.ticker}] ${e.name}</b>${sessionLabel}  $${e.price.toFixed(2)} (${change})\n`;
     msg += `종합신호: <b>${e.signal.label}</b> (${e.signal.score > 0 ? "+" : ""}${e.signal.score}${prevScoreStr})${changedTag}\n`;
+    msg += `RSI(일봉): ${rsiDeltaText}\n`;
 
     if (e.signal.details.length > 0) {
       msg += e.signal.details.map((d) => `  - ${d}`).join("\n") + "\n";
@@ -204,6 +218,12 @@ async function runMonitorCycle(): Promise<void> {
   }
 
   await sendMessage(msg);
+
+  for (const e of summaryEntries) {
+    if (e.rsi !== null) {
+      prevSentRsiValues.set(e.ticker, e.rsi);
+    }
+  }
 }
 
 async function main(): Promise<void> {

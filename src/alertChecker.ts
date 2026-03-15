@@ -55,6 +55,15 @@ function translateSectorName(sector: string | null | undefined): string {
   return map[sector] ?? sector;
 }
 
+function formatRsiAnalysis(rsi: number | null): string {
+  if (rsi === null) return "N/A";
+  if (rsi < 30) return `${rsi.toFixed(1)} 과매도`;
+  if (rsi > 70) return `${rsi.toFixed(1)} 과매수`;
+  if (rsi < 40) return `${rsi.toFixed(1)} 약세`;
+  if (rsi > 60) return `${rsi.toFixed(1)} 강세`;
+  return `${rsi.toFixed(1)} 중립`;
+}
+
 export interface SignalResult {
   score: number;
   label: "강한 매수" | "매수" | "중립" | "매도" | "강한 매도";
@@ -106,6 +115,7 @@ export function analyzeSignal(data: StockData): SignalResult {
   else if (data.macdCross === "bearish") momentum -= 1;
   momentum = clampFactor(momentum);
   details.push(`모멘텀: RSI ${data.rsi !== null ? data.rsi.toFixed(1) : "N/A"}, MACD ${data.macdHistogram !== null ? data.macdHistogram.toFixed(3) : "N/A"}`);
+  details.push(`분봉 RSI(${data.intradayRsiInterval}): ${formatRsiAnalysis(data.intradayRsi)}`);
 
   let volatility = 0;
   if (data.bollinger !== null) {

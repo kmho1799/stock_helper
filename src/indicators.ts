@@ -43,6 +43,8 @@ export interface StockData {
   dailyChangePercent: number;
   rsi: number | null;
   rsiWeekly: number | null;
+  intradayRsi: number | null;
+  intradayRsiInterval: string;
   macdCross: "bullish" | "bearish" | null;
   macdHistogram: number | null;
   bollinger: { upper: number; middle: number; lower: number } | null;
@@ -244,6 +246,23 @@ export async function fetchStockData(ticker: string, marketState: string): Promi
     }
   }
 
+  let intradayRsi: number | null = null;
+  const intradayRsiInterval = "15분";
+  try {
+    const intradayPeriod1 = new Date();
+    intradayPeriod1.setDate(intradayPeriod1.getDate() - 5);
+    const intradayChart = await yf.chart(ticker, { period1: intradayPeriod1, interval: "5m" });
+    const intradayCloses = (intradayChart.quotes ?? [])
+      .map((q) => q.close)
+      .filter((close): close is number => close !== null && close !== undefined);
+    if (intradayCloses.length >= CONFIG.rsiPeriod + 1) {
+      const intradayRsiValues = RSI.calculate({ values: intradayCloses, period: CONFIG.rsiPeriod });
+      intradayRsi = intradayRsiValues.length > 0 ? intradayRsiValues[intradayRsiValues.length - 1] ?? null : null;
+    }
+  } catch {
+    intradayRsi = null;
+  }
+
   const relativeStrength = await getRelativeStrength(ticker, closes);
 
   return {
@@ -253,6 +272,8 @@ export async function fetchStockData(ticker: string, marketState: string): Promi
     dailyChangePercent,
     rsi: rsiValue,
     rsiWeekly: rsiWeeklyValue,
+    intradayRsi,
+    intradayRsiInterval,
     macdCross,
     macdHistogram,
     bollinger,
