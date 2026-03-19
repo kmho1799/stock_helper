@@ -1,4 +1,7 @@
+import dns from 'node:dns';
 import { CONFIG } from './config.js';
+
+dns.setDefaultResultOrder('ipv4first');
 
 const TELEGRAM_MAX_LENGTH = 4096;
 const MAX_RETRIES = 3;
