@@ -56,6 +56,7 @@ async function telegramApiCall(text: string): Promise<void> {
       text,
       parse_mode: 'HTML',
     }),
+    signal: AbortSignal.timeout(10000),
   });
 
   if (!res.ok) {
