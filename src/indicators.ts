@@ -1,4 +1,4 @@
-﻿import YahooFinance from "yahoo-finance2";
+import YahooFinance from "yahoo-finance2";
 import {
   ATR,
   BollingerBands,
@@ -36,6 +36,14 @@ export interface RelativeStrength {
   diff1y: number | null;
 }
 
+export interface MarketContext {
+  dailyReturnMean20: number | null;
+  dailyReturnStd20: number | null;
+  dailyReturnZScore: number | null;
+  atrRatio: number | null;
+  volumeZScore: number | null;
+}
+
 export interface StockData {
   ticker: string;
   currentPrice: number;
@@ -60,6 +68,7 @@ export interface StockData {
   volumeSpike: boolean;
   volumeRatio: number | null;
   relativeStrength: RelativeStrength | null;
+  marketContext: MarketContext;
   timestamp: Date;
 }
 
@@ -68,7 +77,20 @@ function computeWindowReturn(closes: number[], bars: number): number | null {
   const start = closes[closes.length - bars - 1];
   const end = closes[closes.length - 1];
   if (!start || !end) return null;
-  return ((end / start) - 1) * 100;
+  return (end / start - 1) * 100;
+}
+
+function mean(values: number[]): number | null {
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function standardDeviation(values: number[]): number | null {
+  if (values.length < 2) return null;
+  const avg = mean(values);
+  if (avg === null) return null;
+  const variance = values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
 }
 
 async function getRelativeStrength(ticker: string, closes: number[]): Promise<RelativeStrength | null> {
@@ -101,7 +123,8 @@ async function getRelativeStrength(ticker: string, closes: number[]): Promise<Re
       diff6m: stock6m !== null && etf6m !== null ? stock6m - etf6m : null,
       diff1y: stock1y !== null && etf1y !== null ? stock1y - etf1y : null,
     };
-  } catch {
+  } catch (err) {
+    console.warn(`[RelativeStrength] ${ticker} 상대강도 계산 실패:`, err instanceof Error ? err.message : err);
     return null;
   }
 }
@@ -145,6 +168,14 @@ export async function fetchStockData(ticker: string, marketState: string): Promi
   const highs = ohlcv.map((d) => d.high);
   const lows = ohlcv.map((d) => d.low);
   const volumes = ohlcv.map((d) => d.volume);
+  const dailyReturns = closes.slice(1).map((close, index) => ((close / closes[index]) - 1) * 100);
+  const recentDailyReturns = dailyReturns.slice(-20);
+  const dailyReturnMean20 = mean(recentDailyReturns);
+  const dailyReturnStd20 = standardDeviation(recentDailyReturns);
+  const dailyReturnZScore =
+    dailyReturnMean20 !== null && dailyReturnStd20 !== null && dailyReturnStd20 > 0
+      ? (dailyChangePercent - dailyReturnMean20) / dailyReturnStd20
+      : null;
 
   let rsiValue: number | null = null;
   if (closes.length >= CONFIG.rsiPeriod + 1) {
@@ -215,18 +246,29 @@ export async function fetchStockData(ticker: string, marketState: string): Promi
 
   let atr: number | null = null;
   let avgAtr: number | null = null;
+  let atrRatio: number | null = null;
   if (highs.length >= 15) {
     const atrResult = ATR.calculate({ high: highs, low: lows, close: closes, period: 14 });
     atr = atrResult[atrResult.length - 1] ?? null;
     if (atrResult.length >= 20) {
       const recent = atrResult.slice(-20);
       avgAtr = recent.reduce((sum, v) => sum + v, 0) / recent.length;
+      if (atr !== null && avgAtr > 0) {
+        atrRatio = atr / avgAtr;
+      }
     }
   }
 
   const volume = volumes[volumes.length - 1] ?? null;
   const avgVolume = volumes.length >= 20 ? volumes.slice(-20).reduce((sum, v) => sum + v, 0) / 20 : null;
   const volumeRatio = volume !== null && avgVolume !== null && avgVolume > 0 ? volume / avgVolume : null;
+  const recentVolumes = volumes.slice(-20);
+  const volumeMean20 = mean(recentVolumes);
+  const volumeStd20 = standardDeviation(recentVolumes);
+  const volumeZScore =
+    volume !== null && volumeMean20 !== null && volumeStd20 !== null && volumeStd20 > 0
+      ? (volume - volumeMean20) / volumeStd20
+      : null;
   const volumeSpike = volumeRatio !== null && volumeRatio >= 2;
 
   let rsiWeeklyValue: number | null = null;
@@ -247,11 +289,14 @@ export async function fetchStockData(ticker: string, marketState: string): Promi
   }
 
   let intradayRsi: number | null = null;
-  const intradayRsiInterval = "15분";
+  const intervalLabelMap: Record<string, string> = {
+    "1m": "1분", "2m": "2분", "5m": "5분", "15m": "15분", "30m": "30분", "60m": "60분",
+  };
+  const intradayRsiInterval = intervalLabelMap[CONFIG.intradayRsiInterval] ?? CONFIG.intradayRsiInterval;
   try {
     const intradayPeriod1 = new Date();
     intradayPeriod1.setDate(intradayPeriod1.getDate() - 5);
-    const intradayChart = await yf.chart(ticker, { period1: intradayPeriod1, interval: "5m" });
+    const intradayChart = await yf.chart(ticker, { period1: intradayPeriod1, interval: CONFIG.intradayRsiInterval });
     const intradayCloses = (intradayChart.quotes ?? [])
       .map((q) => q.close)
       .filter((close): close is number => close !== null && close !== undefined);
@@ -259,7 +304,8 @@ export async function fetchStockData(ticker: string, marketState: string): Promi
       const intradayRsiValues = RSI.calculate({ values: intradayCloses, period: CONFIG.rsiPeriod });
       intradayRsi = intradayRsiValues.length > 0 ? intradayRsiValues[intradayRsiValues.length - 1] ?? null : null;
     }
-  } catch {
+  } catch (err) {
+    console.warn(`[IntradayRSI] ${ticker} 분봉 RSI 조회 실패:`, err instanceof Error ? err.message : err);
     intradayRsi = null;
   }
 
@@ -289,6 +335,13 @@ export async function fetchStockData(ticker: string, marketState: string): Promi
     volumeSpike,
     volumeRatio,
     relativeStrength,
+    marketContext: {
+      dailyReturnMean20,
+      dailyReturnStd20,
+      dailyReturnZScore,
+      atrRatio,
+      volumeZScore,
+    },
     timestamp: new Date(),
   };
 }
@@ -311,9 +364,10 @@ export async function getMarketState(): Promise<string> {
     const quote = await yf.quote("SPY");
     const state = quote.marketState;
     if (state) return state;
-  } catch {
+    console.warn("[MarketState] SPY 장 상태 값이 비어 있음, 로컬 시간 폴백");
+  } catch (err) {
+    console.warn("[MarketState] Yahoo Finance 조회 실패, 로컬 시간 폴백:", err instanceof Error ? err.message : err);
   }
 
   return getMarketStateByTime();
 }
-
