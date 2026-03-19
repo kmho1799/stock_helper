@@ -105,10 +105,18 @@ export async function sendMessage(message: string): Promise<void> {
         }
         lastErr = null;
         break;
-      } catch (err) {
+      } catch (err: any) {
         lastErr = err;
+        const cause = err?.cause;
+        console.warn(`[Telegram] \uC804\uC1A1 \uC2E4\uD328 (${attempt}/${MAX_RETRIES})`);
+        console.warn(`  type: ${err?.constructor?.name}, code: ${cause?.code ?? 'N/A'}`);
+        if (cause?.errors) {
+          for (const e of cause.errors) {
+            console.warn(`  sub-error: ${e.message} (code: ${e.code}, addr: ${e.address}:${e.port})`);
+          }
+        }
         if (attempt < MAX_RETRIES) {
-          console.warn(`[Telegram] \uC804\uC1A1 \uC2E4\uD328, ${attempt}/${MAX_RETRIES} \uC7AC\uC2DC\uB3C4 \uC911...`);
+          console.warn(`  ${RETRY_DELAY_MS * attempt}ms \uD6C4 \uC7AC\uC2DC\uB3C4...`);
           await delay(RETRY_DELAY_MS * attempt);
         }
       }
