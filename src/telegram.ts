@@ -1,3 +1,4 @@
+import https from 'node:https';
 import dns from 'node:dns';
 import { CONFIG } from './config.js';
 
@@ -48,24 +49,46 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function telegramApiCall(text: string): Promise<void> {
-  const url = `https://api.telegram.org/bot${CONFIG.telegramBotToken}/sendMessage`;
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+function telegramApiCall(text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({
       chat_id: CONFIG.telegramChatId,
       text,
       parse_mode: 'HTML',
-    }),
-    signal: AbortSignal.timeout(10000),
-  });
+    });
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Telegram API ${res.status}: ${body}`);
-  }
+    const req = https.request(
+      {
+        hostname: 'api.telegram.org',
+        path: `/bot${CONFIG.telegramBotToken}/sendMessage`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        timeout: 15000,
+        family: 4,
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk: Buffer) => (body += chunk));
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            resolve();
+          } else {
+            reject(new Error(`Telegram API ${res.statusCode}: ${body}`));
+          }
+        });
+      },
+    );
+
+    req.on('timeout', () => {
+      req.destroy(new Error('Request timeout (15s)'));
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
 }
 
 export function initTelegram(): boolean {
@@ -79,7 +102,7 @@ export function initTelegram(): boolean {
   }
 
   telegramReady = true;
-  console.log('[Telegram] \uCD08\uAE30\uD654 \uC644\uB8CC (fetch \uAE30\uBC18)');
+  console.log('[Telegram] \uCD08\uAE30\uD654 \uC644\uB8CC (https \uBAA8\uB4C8)');
   return true;
 }
 
@@ -107,14 +130,7 @@ export async function sendMessage(message: string): Promise<void> {
         break;
       } catch (err: any) {
         lastErr = err;
-        const cause = err?.cause;
-        console.warn(`[Telegram] \uC804\uC1A1 \uC2E4\uD328 (${attempt}/${MAX_RETRIES})`);
-        console.warn(`  type: ${err?.constructor?.name}, code: ${cause?.code ?? 'N/A'}`);
-        if (cause?.errors) {
-          for (const e of cause.errors) {
-            console.warn(`  sub-error: ${e.message} (code: ${e.code}, addr: ${e.address}:${e.port})`);
-          }
-        }
+        console.warn(`[Telegram] \uC804\uC1A1 \uC2E4\uD328 (${attempt}/${MAX_RETRIES}): ${err?.message}`);
         if (attempt < MAX_RETRIES) {
           console.warn(`  ${RETRY_DELAY_MS * attempt}ms \uD6C4 \uC7AC\uC2DC\uB3C4...`);
           await delay(RETRY_DELAY_MS * attempt);
