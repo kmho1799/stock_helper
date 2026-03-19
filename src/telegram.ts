@@ -1,9 +1,10 @@
-import TelegramBot from 'node-telegram-bot-api';
 import { CONFIG } from './config.js';
 
-let bot: TelegramBot | null = null;
-
 const TELEGRAM_MAX_LENGTH = 4096;
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 2000;
+
+let telegramReady = false;
 
 function sanitizeHtmlMessage(message: string): string {
   return message
@@ -40,6 +41,29 @@ function splitMessage(message: string, maxLength: number): string[] {
   return chunks;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function telegramApiCall(text: string): Promise<void> {
+  const url = `https://api.telegram.org/bot${CONFIG.telegramBotToken}/sendMessage`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: CONFIG.telegramChatId,
+      text,
+      parse_mode: 'HTML',
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Telegram API ${res.status}: ${body}`);
+  }
+}
+
 export function initTelegram(): boolean {
   if (!CONFIG.telegramBotToken || CONFIG.telegramBotToken === 'your_bot_token_here') {
     console.warn('[Telegram] \uBD07 \uD1A0\uD070\uC774 \uC124\uC815\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. .env \uD30C\uC77C\uC744 \uD655\uC778\uD558\uC138\uC694.');
@@ -50,13 +74,13 @@ export function initTelegram(): boolean {
     return false;
   }
 
-  bot = new TelegramBot(CONFIG.telegramBotToken, { polling: false });
-  console.log('[Telegram] \uBD07 \uCD08\uAE30\uD654 \uC644\uB8CC');
+  telegramReady = true;
+  console.log('[Telegram] \uCD08\uAE30\uD654 \uC644\uB8CC (fetch \uAE30\uBC18)');
   return true;
 }
 
 export async function sendMessage(message: string): Promise<void> {
-  if (!bot) {
+  if (!telegramReady) {
     console.log('[Telegram \uBBF8\uC124\uC815] \uBA54\uC138\uC9C0:', message);
     return;
   }
@@ -65,16 +89,29 @@ export async function sendMessage(message: string): Promise<void> {
   const chunks = splitMessage(sanitizedMessage, TELEGRAM_MAX_LENGTH);
 
   for (let i = 0; i < chunks.length; i++) {
-    try {
-      await bot.sendMessage(CONFIG.telegramChatId, chunks[i], { parse_mode: 'HTML' });
-      if (chunks.length > 1) {
-        console.log(`[Telegram] 메시지 전송 완료 (${i + 1}/${chunks.length})`);
-      } else {
-        console.log('[Telegram] 메시지 전송 완료');
+    let lastErr: unknown;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        await telegramApiCall(chunks[i]);
+        if (chunks.length > 1) {
+          console.log(`[Telegram] \uBA54\uC2DC\uC9C0 \uC804\uC1A1 \uC644\uB8CC (${i + 1}/${chunks.length})`);
+        } else {
+          console.log('[Telegram] \uBA54\uC2DC\uC9C0 \uC804\uC1A1 \uC644\uB8CC');
+        }
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < MAX_RETRIES) {
+          console.warn(`[Telegram] \uC804\uC1A1 \uC2E4\uD328, ${attempt}/${MAX_RETRIES} \uC7AC\uC2DC\uB3C4 \uC911...`);
+          await delay(RETRY_DELAY_MS * attempt);
+        }
       }
-    } catch (err) {
-      console.error(`[Telegram] 메시지 전송 실패 (${i + 1}/${chunks.length}):`, err);
-      console.error('[Telegram] 실패 메시지 본문:', chunks[i]);
+    }
+
+    if (lastErr) {
+      console.error(`[Telegram] \uBA54\uC2DC\uC9C0 \uC804\uC1A1 \uCD5C\uC885 \uC2E4\uD328 (${i + 1}/${chunks.length}):`, lastErr);
     }
   }
 }
