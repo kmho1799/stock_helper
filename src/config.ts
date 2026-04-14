@@ -424,8 +424,8 @@ const STOCK_DEFINITIONS: StockDefinition[] = [
     profile: "crypto_related",
   },
   {
-    ticker: "BITF",
-    name: "\uBE44\uD2B8\uD31C\uC2A4",
+    ticker: "KEEL",
+    name: "Keel",
     profile: "crypto_related",
   },
   {

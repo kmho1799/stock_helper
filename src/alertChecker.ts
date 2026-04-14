@@ -86,7 +86,7 @@ function formatStage(value: number, warning: number, critical: number, direction
 
 export interface SignalResult {
   score: number;
-  label: "\uAC15\uD55C \uB9E4\uC218" | "\uB9E4\uC218" | "\uC911\uB9BD" | "\uB9E4\uB3C4" | "\uAC15\uD55C \uB9E4\uB3C4";
+  label: "강한 강세 신호" | "강세 신호" | "관망 구간" | "약세 신호" | "강한 약세 신호";
   emoji: string;
   details: string[];
   factors: {
@@ -200,20 +200,20 @@ export function analyzeSignal(stock: StockConfig, data: StockData): SignalResult
   let label: SignalResult["label"];
   let emoji: string;
   if (score >= rules.labels.strongBuy) {
-    label = "\uAC15\uD55C \uB9E4\uC218";
-    emoji = "\u25b2\u25b2";
+    label = "강한 강세 신호";
+    emoji = "🔺🔺";
   } else if (score >= rules.labels.buy) {
-    label = "\uB9E4\uC218";
-    emoji = "\u25b2";
+    label = "강세 신호";
+    emoji = "🔺";
   } else if (score <= rules.labels.strongSell) {
-    label = "\uAC15\uD55C \uB9E4\uB3C4";
-    emoji = "\u25bc\u25bc";
+    label = "강한 약세 신호";
+    emoji = "🔻🔻";
   } else if (score <= rules.labels.sell) {
-    label = "\uB9E4\uB3C4";
-    emoji = "\u25bc";
+    label = "약세 신호";
+    emoji = "🔻";
   } else {
-    label = "\uC911\uB9BD";
-    emoji = "\u25a0";
+    label = "관망 구간";
+    emoji = "▪️";
   }
 
   details.unshift(

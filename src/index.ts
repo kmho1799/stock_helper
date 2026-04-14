@@ -5,6 +5,7 @@ import { STOCKS, CONFIG } from "./config.js";
 import { fetchStockData, getMarketState, StockData } from "./indicators.js";
 import { checkAlerts, analyzeSignal, SignalResult } from "./alertChecker.js";
 import { initTelegram, sendMessage } from "./telegram.js";
+import { buildAutoSummary } from "./summaryBuilder.js";
 
 const PERIODIC_SUMMARY_INTERVAL_MS = 30 * 60 * 1000;
 let lastPeriodicSummaryAt: Date | null = null;
@@ -14,12 +15,12 @@ const prevSignalFactors = new Map<string, SignalResult["factors"]>();
 const prevSentIntradayRsiValues = new Map<string, number>();
 
 const MARKET_STATE_LABEL: Record<string, string> = {
-  REGULAR: "\uC815\uADDC\uC7A5",
-  PRE: "\uD504\uB9AC\uB9C8\uCF13",
-  PREPRE: "\uD504\uB9AC\uB9C8\uCF13",
-  POST: "\uC560\uD504\uD130\uB9C8\uCF13",
-  POSTPOST: "\uC560\uD504\uD130\uB9C8\uCF13",
-  CLOSED: "\uD734\uC7A5",
+  REGULAR: "정규장",
+  PRE: "프리마켓",
+  PREPRE: "프리마켓",
+  POST: "애프터마켓",
+  POSTPOST: "애프터마켓",
+  CLOSED: "휴장",
 };
 
 interface CycleEntry {
@@ -42,9 +43,9 @@ interface MonitorCycleOptions {
 }
 
 function formatDirection(change: number): string {
-  if (change > 0) return "\u25b2";
-  if (change < 0) return "\u25bc";
-  return "\u25a0";
+  if (change > 0) return "▲";
+  if (change < 0) return "▼";
+  return "■";
 }
 
 function formatIntradayRsiState(value: number | null): string {
@@ -79,66 +80,26 @@ function summarizeAlerts(alerts: string[]): string[] {
   return alerts.map((alert) => alert.replace(/<[^>]+>/g, ""));
 }
 
-function getSignalEmoji(label: string): string {
-  const map: Record<string, string> = {
-    "\uAC15\uD55C \uB9E4\uC218": "\uD83D\uDFE2\uD83D\uDFE2",
-    "\uB9E4\uC218": "\uD83D\uDFE2",
-    "\uC911\uB9BD": "\u26AA",
-    "\uB9E4\uB3C4": "\uD83D\uDD34",
-    "\uAC15\uD55C \uB9E4\uB3C4": "\uD83D\uDD34\uD83D\uDD34",
-  };
-  return map[label] ?? "\u26AA";
-}
-
 function formatFactorsWithDelta(
   factors: SignalResult["factors"],
   prevFactors: SignalResult["factors"] | null
 ): string {
   const names: [keyof SignalResult["factors"], string][] = [
-    ["trend", "\uCD94\uC138"],
-    ["momentum", "\uBAA8\uBA58\uD140"],
-    ["volatility", "\uBCC0\uB3D9\uC131"],
-    ["flow", "\uC218\uAE09"],
-    ["relative", "\uC0C1\uB300"],
+    ["trend", "추세"],
+    ["momentum", "모멘텀"],
+    ["volatility", "변동성"],
+    ["flow", "수급"],
+    ["relative", "상대"],
   ];
   return names.map(([key, label]) => {
     const curr = factors[key];
     const sign = curr > 0 ? "+" : "";
     let arrow = "";
     if (prevFactors && curr !== prevFactors[key]) {
-      arrow = curr > prevFactors[key] ? "\u2B06" : "\u2B07";
+      arrow = curr > prevFactors[key] ? "⬆" : "⬇";
     }
     return `${label}${sign}${curr}${arrow}`;
   }).join(" ");
-}
-
-function categorizeAlerts(alerts: string[]): { events: string[]; warnings: string[] } {
-  const warningPrefixes = ["[RSI]", "[\uC8FC\uBD09 RSI]", "[\uAC00\uACA9]", "[\uBCC0\uB3D9\uC131]"];
-  const events: string[] = [];
-  const warnings: string[] = [];
-
-  for (const alert of alerts) {
-    const clean = alert.replace(/^\[[^\]]+\]\s*/, "").replace(/<\/?b>/g, "");
-    if (warningPrefixes.some((p) => alert.startsWith(p))) {
-      warnings.push(clean);
-    } else {
-      events.push(clean);
-    }
-  }
-  return { events, warnings };
-}
-
-function extractDetails(details: string[]): { trend: string[]; relative: string | null } {
-  const trend: string[] = [];
-  let relative: string | null = null;
-  for (const detail of details) {
-    if (detail.startsWith("\uCD94\uC138:")) {
-      trend.push(detail.replace("\uCD94\uC138: ", ""));
-    } else if (detail.startsWith("\uC0C1\uB300\uAC15\uB3C4:")) {
-      relative = detail.replace("\uC0C1\uB300\uAC15\uB3C4: ", "");
-    }
-  }
-  return { trend, relative };
 }
 
 function getCurrentHourInTimezone(timezone: string): number {
@@ -199,6 +160,121 @@ async function appendAlertLogs(entries: CycleEntry[], marketState: string, summa
   await appendFile(logFile, `${lines.join("\n")}\n`, "utf-8");
 }
 
+// ─── 메시지 빌더 ───────────────────────────────────────────────
+
+function buildHeader(now: string, stateStr: string, isPeriodicOnly: boolean): string {
+  const headerLabel = isPeriodicOnly ? "정기 요약" : "모니터링 알림";
+  const headerEmoji = isPeriodicOnly ? "📋" : "📡";
+  return `${headerEmoji} <b>${headerLabel}</b>  ${now} │ ${stateStr}`;
+}
+
+function buildSignalLine(alerts: string[]): string {
+  if (alerts.length === 0) return "";
+
+  const criticalPrefixes = ["[변동성]", "[가격]"];
+  const warningPrefixes = ["[RSI]", "[주봉 RSI]", "[볼린저]", "[거래량]", "[ATR]"];
+
+  let priorityEmoji = "ℹ️";
+  for (const alert of alerts) {
+    if (criticalPrefixes.some((p) => alert.startsWith(p))) {
+      priorityEmoji = "🚨";
+      break;
+    }
+    if (warningPrefixes.some((p) => alert.startsWith(p))) {
+      priorityEmoji = "⚠️";
+    }
+  }
+
+  const labels = alerts.slice(0, 3).map((alert) => {
+    return alert
+      .replace(/^\[[^\]]+\]\s*/, "")
+      .replace(/<b>/g, "")
+      .replace(/<\/b>/g, "")
+      .replace(/\s*\(.*?\)\s*$/, "")
+      .trim();
+  });
+
+  return `└ ${priorityEmoji} ${labels.join(" / ")}`;
+}
+
+function buildJudgmentCheck(entry: CycleEntry): string {
+  const lines: string[] = [];
+
+  const { ma50, ma200, volumeRatio } = entry.data;
+
+  if (ma50 !== null && ma200 !== null) {
+    const ma50Status = entry.price > ma50 ? "MA50 상회" : "MA50 하회";
+    const ma200Status = entry.price > ma200 ? "MA200 상회" : "MA200 하회";
+    const alignment = ma50 > ma200 ? "정배열" : "역배열";
+    lines.push(`- 추세: ${ma50Status}, ${ma200Status} (${alignment})`);
+  } else if (ma50 !== null) {
+    lines.push(`- 추세: ${entry.price > ma50 ? "MA50 상회" : "MA50 하회"}`);
+  } else {
+    lines.push("- 추세: 데이터 없음");
+  }
+
+  if (volumeRatio !== null) {
+    const strength = volumeRatio >= 1.5 ? "강함" : volumeRatio >= 0.9 ? "보통" : "약함";
+    lines.push(`- 수급: 거래량 ${volumeRatio.toFixed(1)}배로 ${strength}`);
+  } else {
+    lines.push("- 수급: 데이터 없음");
+  }
+
+  lines.push("- 이벤트: 없음");
+
+  return `<b>판단 체크</b>\n${lines.join("\n")}`;
+}
+
+function isFullVersion(entry: CycleEntry): boolean {
+  return Math.abs(entry.signal.score) >= 3 || entry.alerts.length > 0;
+}
+
+function buildStockBlock(entry: CycleEntry, sessionLabel: string): string {
+  const change = `${entry.dailyChangePercent >= 0 ? "+" : ""}${entry.dailyChangePercent.toFixed(2)}%`;
+  const priceStr = `$${entry.price.toFixed(2)} (${change})`;
+  const full = isFullVersion(entry);
+
+  const scoreChanged = entry.prevSignalScore !== null && entry.prevSignalScore !== entry.signal.score;
+  const changeIcon = scoreChanged ? " 🔄" : "";
+  const sessionPart = sessionLabel ? `  ${sessionLabel}` : "";
+
+  let block = `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  block += `${entry.signal.emoji} <b>${entry.ticker}</b>${sessionPart}  ${priceStr}${changeIcon}\n`;
+
+  if (full) {
+    const signalLine = buildSignalLine(entry.alerts);
+    if (signalLine) {
+      block += `${signalLine}\n`;
+    }
+    const summary = buildAutoSummary(entry.data, entry.signal);
+    block += `요약: ${summary}\n`;
+    block += `\n${buildJudgmentCheck(entry)}\n`;
+  } else {
+    const summary = buildAutoSummary(entry.data, entry.signal);
+    block += `└ 요약: ${summary}\n`;
+  }
+
+  return block;
+}
+
+function buildSummaryFooter(allEntries: CycleEntry[]): string {
+  const sorted = [...allEntries].sort((a, b) => {
+    const absDiff = Math.abs(b.signal.score) - Math.abs(a.signal.score);
+    if (absDiff !== 0) return absDiff;
+    return a.ticker.localeCompare(b.ticker);
+  });
+
+  const parts = sorted.map((entry) => {
+    const sign = entry.signal.score > 0 ? "+" : "";
+    const changeSign = entry.dailyChangePercent >= 0 ? "+" : "";
+    return `${entry.signal.emoji} ${entry.ticker}(${sign}${entry.signal.score}, ${changeSign}${entry.dailyChangePercent.toFixed(2)}%)`;
+  });
+
+  return `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n전체 신호  ${parts.join("  ")}`;
+}
+
+// ────────────────────────────────────────────────────────────────
+
 async function runMonitorCycle(options: MonitorCycleOptions = {}): Promise<void> {
   const { forceRun = false } = options;
 
@@ -212,25 +288,25 @@ async function runMonitorCycle(options: MonitorCycleOptions = {}): Promise<void>
   const marketState = await getMarketState();
 
   if (marketState === "CLOSED") {
-    console.log(`[${new Date().toLocaleString("ko-KR")}] \uD734\uC7A5\uC77C - \uC54C\uB9BC \uBC0F \uBAA8\uB2C8\uD130\uB9C1 \uC2A4\uD0B5`);
+    console.log(`[${new Date().toLocaleString("ko-KR")}] 휴장일 - 알림 및 모니터링 스킵`);
     return;
   }
 
   if (CONFIG.marketHoursOnly && marketState !== "REGULAR") {
     console.log(
-      `[${new Date().toLocaleString("ko-KR")}] \uC7A5\uC678 \uC2DC\uAC04 (${MARKET_STATE_LABEL[marketState] ?? marketState}) - \uC2A4\uD0B5`
+      `[${new Date().toLocaleString("ko-KR")}] 장외 시간 (${MARKET_STATE_LABEL[marketState] ?? marketState}) - 스킵`
     );
     return;
   }
 
   const stateStr = MARKET_STATE_LABEL[marketState] ?? marketState;
-  console.log(`\n[${new Date().toLocaleString("ko-KR")}] \uBAA8\uB2C8\uD130\uB9C1 \uC0AC\uC774\uD074 \uC2DC\uC791 [${stateStr}]`);
+  console.log(`\n[${new Date().toLocaleString("ko-KR")}] 모니터링 사이클 시작 [${stateStr}]`);
 
   const entries: CycleEntry[] = [];
 
   for (const stock of STOCKS) {
     try {
-      console.log(`  [${stock.ticker}] \uB370\uC774\uD130 \uC218\uC9D1 \uC911...`);
+      console.log(`  [${stock.ticker}] 데이터 수집 중...`);
       const data = await fetchStockData(stock.ticker, marketState);
       const signal = analyzeSignal(stock, data);
       const { alerts, includeStrongSignal } = checkAlerts(stock, data, signal);
@@ -241,14 +317,17 @@ async function runMonitorCycle(options: MonitorCycleOptions = {}): Promise<void>
       const weeklyRsiLog = data.rsiWeekly !== null ? data.rsiWeekly.toFixed(1) : "N/A";
       const intradayRsiLog = data.intradayRsi !== null ? data.intradayRsi.toFixed(1) : "N/A";
       const intradayStateLog = formatIntradayRsiState(data.intradayRsi);
+      const prevScore = prevSignalScores.get(stock.ticker) ?? null;
+      const prevFactorsVal = prevSignalFactors.get(stock.ticker) ?? null;
 
       console.log(`  * ${direction} [${stock.ticker}] ${stock.name} [${stateStr}]`);
-      console.log(`  - \uAC00\uACA9: $${data.currentPrice.toFixed(2)} (${data.dailyChangePercent >= 0 ? "+" : ""}${data.dailyChangePercent.toFixed(2)}%)`);
-      console.log(`  - \uC2E0\uD638: ${signal.label} (${signal.score > 0 ? "+" : ""}${signal.score})`);
+      console.log(`  - 가격: $${data.currentPrice.toFixed(2)} (${data.dailyChangePercent >= 0 ? "+" : ""}${data.dailyChangePercent.toFixed(2)}%)`);
+      console.log(`  - 신호: ${signal.label} (${signal.score > 0 ? "+" : ""}${signal.score})`);
+      console.log(`  - 팩터: ${formatFactorsWithDelta(signal.factors, prevFactorsVal)}`);
       console.log(`  - RSI: ${data.intradayRsiInterval} ${intradayRsiLog} (${intradayStateLog}) | 일봉 ${rsiLog} | 주봉 ${weeklyRsiLog}`);
-      console.log(`  - \uBCC0\uB3D9\uC131 z-score: ${zScoreLog}`);
+      console.log(`  - 변동성 z-score: ${zScoreLog}`);
       if (alerts.length > 0) {
-        console.log(`  - \uC54C\uB9BC: ${summarizeAlerts(alerts).join(", ")}`);
+        console.log(`  - 알림: ${summarizeAlerts(alerts).join(", ")}`);
       }
 
       entries.push({
@@ -260,13 +339,13 @@ async function runMonitorCycle(options: MonitorCycleOptions = {}): Promise<void>
         signal,
         alerts,
         includeStrongSignal,
-        prevSignalScore: prevSignalScores.get(stock.ticker) ?? null,
-        prevFactors: prevSignalFactors.get(stock.ticker) ?? null,
+        prevSignalScore: prevScore,
+        prevFactors: prevFactorsVal,
         prevSentIntradayRsi: prevSentIntradayRsiValues.get(stock.ticker) ?? null,
         data,
       });
     } catch (err) {
-      console.error(`  [${stock.ticker}] \uC624\uB958 \uBC1C\uC0DD:`, err);
+      console.error(`  [${stock.ticker}] 오류 발생:`, err);
     }
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -286,7 +365,7 @@ async function runMonitorCycle(options: MonitorCycleOptions = {}): Promise<void>
       const scoreChanged = entry.prevSignalScore !== null && entry.prevSignalScore !== entry.signal.score;
       return (entry.alerts.length > 0 || entry.includeStrongSignal) || scoreChanged;
     })
-    .sort((a, b) => b.signal.score - a.signal.score);
+    .sort((a, b) => Math.abs(b.signal.score) - Math.abs(a.signal.score));
 
   const isFirstRun = lastPeriodicSummaryAt === null;
 
@@ -297,95 +376,30 @@ async function runMonitorCycle(options: MonitorCycleOptions = {}): Promise<void>
   const showAll = isFirstRun || (isPeriodicSummary && highlighted.length === 0);
   const summaryEntries = (showAll ? entries : highlighted)
     .slice()
-    .sort((a, b) => b.signal.score - a.signal.score);
+    .sort((a, b) => Math.abs(b.signal.score) - Math.abs(a.signal.score));
 
-  const now = new Date().toLocaleString("ko-KR", { timeZone: CONFIG.alertDeliveryTimezone });
+  const now = new Date().toLocaleString("ko-KR", {
+    timeZone: CONFIG.alertDeliveryTimezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
   const isPeriodicOnly = isPeriodicSummary && highlighted.length === 0;
-  const headerLabel = isPeriodicOnly ? "\uC815\uAE30 \uC694\uC57D" : "\uBAA8\uB2C8\uD130\uB9C1 \uC54C\uB9BC";
-  const headerEmoji = isPeriodicOnly ? "\uD83D\uDCCB" : "\uD83D\uDCE1";
-  let msg = `${headerEmoji} <b>${headerLabel}</b>\n`;
-  msg += `\uD83D\uDD50 ${now} \u2502 ${stateStr} \u2502 ${summaryEntries.length}\uC885\uBAA9\n`;
-  msg += `\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501`;
+  const sessionLabel = marketState !== "REGULAR" ? `[${stateStr}]` : "";
+
+  let msg = buildHeader(now, stateStr, isPeriodicOnly);
 
   for (const entry of summaryEntries) {
-    const signalEmoji = getSignalEmoji(entry.signal.label);
-    const change = `${entry.dailyChangePercent >= 0 ? "+" : ""}${entry.dailyChangePercent.toFixed(2)}%`;
-    const scoreChanged = entry.prevSignalScore !== null && entry.prevSignalScore !== entry.signal.score;
-    const prevScoreStr = scoreChanged && entry.prevSignalScore !== null
-      ? ` \u2190 ${entry.prevSignalScore > 0 ? "+" : ""}${entry.prevSignalScore}`
-      : "";
-    const changeIcon = scoreChanged ? " \uD83D\uDD04" : "";
-    const sessionLabel = marketState !== "REGULAR" ? ` [${stateStr}]` : "";
-
-    msg += `\n\n<b>${signalEmoji} ${entry.ticker} ${entry.name}</b>${sessionLabel}  $${entry.price.toFixed(2)} (${change})\n`;
-    msg += `\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n`;
-    msg += `\uC2E0\uD638  ${entry.signal.emoji} ${entry.signal.label} (${entry.signal.score > 0 ? "+" : ""}${entry.signal.score}${prevScoreStr})${changeIcon}\n`;
-    msg += `\uD329\uD130  ${formatFactorsWithDelta(entry.signal.factors, entry.prevFactors)}\n`;
-
-    const rsiStr = entry.data.rsi !== null ? entry.data.rsi.toFixed(1) : "N/A";
-    const weeklyRsiStr = entry.data.rsiWeekly !== null ? entry.data.rsiWeekly.toFixed(1) : "N/A";
-    msg += `\n  \uD83D\uDCC8 ${entry.data.intradayRsiInterval}RSI ${formatIntradayRsiDelta(entry)} \u2502 \uC77C\uBD09${rsiStr} \u2502 \uC8FC\uBD09${weeklyRsiStr}\n`;
-
-    const { events, warnings } = categorizeAlerts(entry.alerts);
-    if (events.length > 0) {
-      msg += `  \u26A1 ${events.join(" \u2502 ")}\n`;
-    }
-    if (warnings.length > 0) {
-      msg += `  \uD83D\uDEA8 ${warnings.join(" \u2502 ")}\n`;
-    }
-
-    const extracted = extractDetails(entry.signal.details);
-    if (extracted.trend.length > 0) {
-      msg += `  \uD83D\uDCA1 ${extracted.trend.join(" \u2502 ")}\n`;
-    }
-    if (extracted.relative) {
-      msg += `  \uD83C\uDFF7 ${extracted.relative}\n`;
-    }
+    msg += buildStockBlock(entry, sessionLabel);
   }
 
-  msg += `\n\n\u2501\u2501\u2501 \uC804\uCCB4 \uC2E0\uD638 \uC694\uC57D \u2501\u2501\u2501\n`;
-
-  interface GroupEntry {
-    scoreStr: string;
-    score: number;
-  }
-
-  const groups = {
-    strongBuy: { label: "\uAC15\uD55C \uB9E4\uC218", emoji: "\uD83D\uDFE2\uD83D\uDFE2", items: [] as GroupEntry[] },
-    buy: { label: "\uB9E4\uC218", emoji: "\uD83D\uDFE2", items: [] as GroupEntry[] },
-    neutral: { label: "\uC911\uB9BD", emoji: "\u26AA", items: [] as GroupEntry[] },
-    sell: { label: "\uB9E4\uB3C4", emoji: "\uD83D\uDD34", items: [] as GroupEntry[] },
-    strongSell: { label: "\uAC15\uD55C \uB9E4\uB3C4", emoji: "\uD83D\uDD34\uD83D\uDD34", items: [] as GroupEntry[] },
-  };
-
-  for (const entry of entries) {
-    const sign = entry.signal.score > 0 ? "+" : "";
-    const changeSign = entry.dailyChangePercent >= 0 ? "+" : "";
-    const changed = entry.prevSignalScore !== null && entry.prevSignalScore !== entry.signal.score;
-    const scoreStr = `${entry.ticker}(${sign}${entry.signal.score}, ${changeSign}${entry.dailyChangePercent.toFixed(2)}%)${changed ? " \uD83D\uDD04" : ""}`;
-    const groupEntry: GroupEntry = { scoreStr, score: entry.signal.score };
-
-    if (entry.signal.label === "\uAC15\uD55C \uB9E4\uC218") groups.strongBuy.items.push(groupEntry);
-    else if (entry.signal.label === "\uB9E4\uC218") groups.buy.items.push(groupEntry);
-    else if (entry.signal.label === "\uAC15\uD55C \uB9E4\uB3C4") groups.strongSell.items.push(groupEntry);
-    else if (entry.signal.label === "\uB9E4\uB3C4") groups.sell.items.push(groupEntry);
-    else groups.neutral.items.push(groupEntry);
-  }
-
-  for (const group of [groups.strongBuy, groups.buy, groups.neutral]) {
-    group.items.sort((a, b) => b.score - a.score);
-  }
-  for (const group of [groups.sell, groups.strongSell]) {
-    group.items.sort((a, b) => a.score - b.score);
-  }
-  for (const group of [groups.strongBuy, groups.buy, groups.neutral, groups.sell, groups.strongSell]) {
-    if (group.items.length > 0) {
-      msg += `${group.emoji} ${group.label}  ${group.items.map((item) => item.scoreStr).join(" ")}\n`;
-    }
-  }
+  msg += buildSummaryFooter(entries);
 
   await sendMessage(msg);
-  await appendAlertLogs(summaryEntries, marketState, headerLabel);
+  await appendAlertLogs(summaryEntries, marketState, isPeriodicOnly ? "정기 요약" : "모니터링 알림");
 
   for (const entry of summaryEntries) {
     if (entry.data.intradayRsi !== null) {
@@ -396,15 +410,15 @@ async function runMonitorCycle(options: MonitorCycleOptions = {}): Promise<void>
 
 async function main(): Promise<void> {
   console.log("====================================");
-  console.log("  NASDAQ \uC8FC\uC2DD \uBAA8\uB2C8\uD130\uB9C1 \uC11C\uBC84 \uC2DC\uC791");
+  console.log("  NASDAQ 주식 모니터링 서버 시작");
   console.log("====================================");
-  console.log(`\uCD94\uC801 \uC885\uBAA9: ${STOCKS.map((stock) => stock.ticker).join(", ")}`);
-  console.log(`\uCCB4\uD06C \uC8FC\uAE30: ${CONFIG.checkIntervalMinutes}\uBD84`);
-  console.log(`\uC7A5\uC911 \uC81C\uD55C: ${CONFIG.marketHoursOnly ? "\uD65C\uC131" : "\uBE44\uD65C\uC131"}`);
+  console.log(`추적 종목: ${STOCKS.map((stock) => stock.ticker).join(", ")}`);
+  console.log(`체크 주기: ${CONFIG.checkIntervalMinutes}분`);
+  console.log(`장중 제한: ${CONFIG.marketHoursOnly ? "활성" : "비활성"}`);
   console.log(
-    `\uC54C\uB9BC \uC2DC\uAC04 \uC81C\uD55C: ${CONFIG.alertDeliveryOnly ? `${CONFIG.alertDeliveryTimezone} ${CONFIG.alertDeliveryStartHour}:00~${CONFIG.alertDeliveryEndHour}:00` : "\uBE44\uD65C\uC131"}`
+    `알림 시간 제한: ${CONFIG.alertDeliveryOnly ? `${CONFIG.alertDeliveryTimezone} ${CONFIG.alertDeliveryStartHour}:00~${CONFIG.alertDeliveryEndHour}:00` : "비활성"}`
   );
-  console.log(`\uB85C\uADF8 \uC800\uC7A5: ${path.resolve(CONFIG.alertLogDir, CONFIG.alertLogFile)}`);
+  console.log(`로그 저장: ${path.resolve(CONFIG.alertLogDir, CONFIG.alertLogFile)}`);
   console.log("====================================\n");
 
   initTelegram();
@@ -412,16 +426,16 @@ async function main(): Promise<void> {
   await runMonitorCycle({ forceRun: true });
 
   const cronExpression = `*/${CONFIG.checkIntervalMinutes} * * * *`;
-  console.log(`\n\uD06C\uB860 \uC2A4\uCF00\uC904 \uB4F1\uB85D: ${cronExpression}`);
+  console.log(`\n크론 스케줄 등록: ${cronExpression}`);
 
   cron.schedule(cronExpression, async () => {
     await runMonitorCycle();
   });
 
-  console.log("\uBAA8\uB2C8\uD130\uB9C1 \uC11C\uBC84 \uC2E4\uD589 \uC911... (Ctrl+C \uB85C \uC885\uB8CC)\n");
+  console.log("모니터링 서버 실행 중... (Ctrl+C 로 종료)\n");
 }
 
 main().catch((err) => {
-  console.error("\uCE58\uBA85\uC801 \uC624\uB958:", err);
+  console.error("치명적 오류:", err);
   process.exit(1);
 });
